@@ -117,10 +117,24 @@ try {
       return (first !== undefined) ? first : "";
     };
 
-    // Helper: resolve the correct CDN base for script assets (EU vs US)
-    u.getCdnBase = function () {
-      var zone = (u.data.serverZone || "").toUpperCase();
-      return zone === "EU" ? "https://cdn.eu.amplitude.com" : "https://cdn.amplitude.com";
+    // Script loader with onerror handling — resolves on load, rejects/resolves on error
+    // to prevent Promise.all from hanging if a CDN request fails.
+    u.loadScript = function (src, id) {
+      return new Promise(function (resolve) {
+        var script = document.createElement("script");
+        script.type = "text/javascript";
+        script.async = true;
+        script.charset = "utf-8";
+        script.src = src;
+        if (id) script.id = id;
+        script.addEventListener("load", function () { resolve(true); });
+        script.addEventListener("error", function () {
+          utag.DB("utag ##UTID##: failed to load " + src);
+          resolve(false); // resolve (not reject) so Promise.all continues
+        });
+        var head = document.getElementsByTagName("head")[0];
+        if (head) head.appendChild(script);
+      });
     };
 
     ##UTGEN##
@@ -173,30 +187,27 @@ try {
     // then calls u.loaderCallback() which registers plugins and calls amplitude.init().
     // Sequencing: SR script + G&S script + webExperiment poll → register all → init
     u.sdkLoaderCallback = function () {
-      var cdnBase = u.getCdnBase();
+      // Orange uses EU data residency — always use cdn.eu.amplitude.com for script assets.
+      var cdnBase = "https://cdn.eu.amplitude.com";
       var sessionReplayUrl = cdnBase + "/libs/plugin-session-replay-browser-##session_replay_version##-min.js.gz".replace("##session_replay_version##", u.data.session_replay_version);
 
+      // Capture config values now to avoid stale u.data reads when loaderCallback runs later
+      var initConfig = {
+        api_key: u.data.api_key,
+        customer_id: u.data.customer_id,
+        userId: u.data.userId,
+        data: JSON.parse(JSON.stringify(u.data))
+      };
+
       Promise.all([
-        // --- Plugin 1: Session Replay (loaded as script, if enabled) ---
-        u.toBoolean(u.data.session_replay) && new Promise(function (resolve) {
-          u.loader({
-            type: "script",
-            src: sessionReplayUrl,
-            cb: resolve,
-            loc: "script",
-            id: "utag_session_replay_##UTID##"
-          });
-        }),
-        // --- Plugin 2: Guides & Surveys / Engagement (loaded as script, if enabled) ---
-        u.toBoolean(u.data.guides_and_surveys) && new Promise(function (resolve) {
-          u.loader({
-            type: "script",
-            src: cdnBase + "/script/" + u.data.api_key + ".engagement.js",
-            cb: resolve,
-            loc: "script",
-            id: "utag_guides_and_surveys_##UTID##"
-          });
-        }),
+        // --- Plugin 1: Session Replay (loaded with onerror handling) ---
+        u.toBoolean(u.data.session_replay) &&
+          u.loadScript(sessionReplayUrl, "utag_session_replay_##UTID##"),
+
+        // --- Plugin 2: Guides & Surveys / Engagement (loaded with onerror handling) ---
+        u.toBoolean(u.data.guides_and_surveys) &&
+          u.loadScript(cdnBase + "/script/" + u.data.api_key + ".engagement.js", "utag_guides_and_surveys_##UTID##"),
+
         // --- Plugin 3: Web Experiment (loaded by external synchronous Tag 1) ---
         // Poll for window.webExperiment which is set by the separate experiment.js tag.
         // This MUST resolve before amplitude.init() to support Page Triggers ("On Event Tracked").
@@ -221,54 +232,59 @@ try {
           })();
         })
       ].filter(Boolean)).then(function () {
-        u.loaderCallback();
+        u.loaderCallback(initConfig);
       });
     };
 
     // Start Loader Callback — registers all plugins, then calls amplitude.init()
-    u.loaderCallback = function () {
+    // Accepts initConfig snapshot captured at sdkLoaderCallback time to avoid stale u.data reads.
+    u.loaderCallback = function (initConfig) {
       utag.DB('send:##UTID##:CALLBACK');
       u.initialized = true;
 
+      // Use the captured config snapshot to avoid stale u.data if multiple events fired
+      var d = (initConfig && initConfig.data) ? initConfig.data : u.data;
+
       var amplConfig = {
-        flushIntervalMillis: u.data.flushIntervalMillis,
-        flushQueueSize: u.data.flushQueueSize,
-        flushMaxRetries: u.data.flushMaxRetries,
-        logLevel: u.data.logLevel,
-        serverUrl: u.data.serverUrl,
-        serverZone: u.data.serverZone,
-        useBatch: u.toBoolean(u.data.useBatch),
+        flushIntervalMillis: d.flushIntervalMillis,
+        flushQueueSize: d.flushQueueSize,
+        flushMaxRetries: d.flushMaxRetries,
+        logLevel: d.logLevel,
+        serverUrl: d.serverUrl,
+        serverZone: d.serverZone,
+        useBatch: u.toBoolean(d.useBatch),
         autocapture: {
-          attribution: u.setDefaultValue(u.data.attribution),
-          pageViews: u.setDefaultValue(u.data.pageViews),
-          sessions: u.setDefaultValue(u.data.sessions),
-          fileDownload: u.setDefaultValue(u.data.fileDownloads),
-          formInteractions: u.setDefaultValue(u.data.formInteractions),
-          elementInteractions: u.setDefaultValue(u.data.elementInteractions)
+          attribution: u.setDefaultValue(d.attribution),
+          pageViews: u.setDefaultValue(d.pageViews),
+          sessions: u.setDefaultValue(d.sessions),
+          fileDownload: u.setDefaultValue(d.fileDownloads),
+          formInteractions: u.setDefaultValue(d.formInteractions),
+          elementInteractions: u.setDefaultValue(d.elementInteractions)
         },
-        deviceId: u.data.deviceId,
+        deviceId: d.deviceId,
         cookieOptions: u.clearEmptyKeys({
-            domain: u.data.domain,
-            expiration: u.data.expiration,
-            sameSite: u.data.sameSite,
-            secure: u.data.secure,
-            upgrade: u.setDefaultValue(u.data.upgrade),
+            domain: d.domain,
+            expiration: d.expiration,
+            sameSite: d.sameSite,
+            secure: d.secure,
+            upgrade: u.setDefaultValue(d.upgrade),
         }),
-        identityStorage: u.data.identityStorage,
+        identityStorage: d.identityStorage,
         trackingOptions: {
-          ipAddress: u.setDefaultValue(u.data.ipAddress),
-          language: u.setDefaultValue(u.data.language),
-          platform: u.setDefaultValue(u.data.platform),
+          ipAddress: u.setDefaultValue(d.ipAddress),
+          language: u.setDefaultValue(d.language),
+          platform: u.setDefaultValue(d.platform),
         },
-        transport: u.data.transport
+        transport: d.transport
       };
 
-      if (!u.toBoolean(u.data.autocapture)) {
+      if (!u.toBoolean(d.autocapture)) {
         amplConfig.autocapture = false;
       }
 
-      if (u.data.customer_id === "" && u.data.userId) {
-        u.data.customer_id = u.data.userId;
+      var customerId = d.customer_id;
+      if (customerId === "" && d.userId) {
+        customerId = d.userId;
       }
 
       // --- Plugin Registration (ALL plugins BEFORE amplitude.init) ---
@@ -276,27 +292,27 @@ try {
       // require the webExperiment plugin to be registered before autocaptured page views fire.
 
       // 1. Session Replay plugin
-      if (u.toBoolean(u.data.session_replay) && window.sessionReplay && typeof window.sessionReplay.plugin === "function") {
+      if (u.toBoolean(d.session_replay) && window.sessionReplay && typeof window.sessionReplay.plugin === "function") {
         amplitude.add(window.sessionReplay.plugin());
         utag.DB("utag ##UTID##: Session Replay plugin registered");
       }
 
       // 2. Guides & Surveys (Engagement) plugin
-      if (u.toBoolean(u.data.guides_and_surveys) && window.engagement && typeof window.engagement.plugin === "function") {
+      if (u.toBoolean(d.guides_and_surveys) && window.engagement && typeof window.engagement.plugin === "function") {
         amplitude.add(window.engagement.plugin());
         utag.DB("utag ##UTID##: Guides & Surveys plugin registered");
       }
 
       // 3. Web Experiment plugin (loaded by external synchronous tag)
-      if (window.webExperiment && typeof window.webExperiment.plugin === "function") {
+      if (u.toBoolean(d.web_experiment) && window.webExperiment && typeof window.webExperiment.plugin === "function") {
         amplitude.add(window.webExperiment.plugin());
         utag.DB("utag ##UTID##: Web Experiment plugin registered");
-      } else {
+      } else if (u.toBoolean(d.web_experiment)) {
         utag.DB("utag ##UTID##: Web Experiment plugin NOT available at init time — Page Triggers may not fire for autocaptured events");
       }
 
       // --- Initialize Amplitude (autocaptured page views fire after this) ---
-      var initResult = amplitude.init(u.data.api_key, u.data.customer_id, u.clearEmptyKeys(amplConfig));
+      var initResult = amplitude.init(d.api_key, customerId, u.clearEmptyKeys(amplConfig));
       if (initResult && initResult.promise && typeof initResult.promise.then === "function") {
         initResult.promise.then(function () {
           u.amplitudeReady = true;
