@@ -2,12 +2,12 @@
 
 ## Architecture: Two-Tag Setup
 
-| Tag | Script | Load Type | Priority |
-|-----|--------|-----------|----------|
-| **Tag 1** | Web Experiment (`experiment.js`) | **Synchronous** | Highest (fires first) |
-| **Tag 2** | Unified Amplitude Browser SDK | **Asynchronous** | After Tag 1 |
+| Tag | Script | Load Type | Tealium Load Order |
+|-----|--------|-----------|-------------------|
+| **Tag 1** | Web Experiment (`experiment.js`) | **Synchronous** | **utag Sync** (Step 1) |
+| **Tag 2** | Unified Amplitude Browser SDK | **Asynchronous** | **Tags priorisés** (Step 5) |
 
-Tag 1 **must** load before Tag 2. This ensures the Web Experiment plugin is available when the Analytics SDK initializes, which is required for Page Triggers to work on autocaptured page views.
+Tag 1 **must** load before Tag 2. In Tealium's Load Order Manager, **utag Sync** (step 1) always executes before **Tags priorisés** (step 5), guaranteeing the correct sequence. This ensures the Web Experiment plugin is available when the Analytics SDK initializes, which is required for Page Triggers to work on autocaptured page views.
 
 ---
 
@@ -15,22 +15,24 @@ Tag 1 **must** load before Tag 2. This ensures the Web Experiment plugin is avai
 
 ### Setup in Tealium iQ
 
-1. **Add a Custom Script tag** (or JavaScript Code tag)
-2. Set **Load Order** to the **highest priority** (lowest number)
-3. Set **Load Type** to **Synchronous**
-4. Script URL:
+1. **Create a tag** for the Web Experiment script with the following URL:
    ```
    //cdn.eu.amplitude.com/script/<API_KEY>.experiment.js
    ```
    Replace `<API_KEY>` with your Amplitude project API key.
 
-5. **Trigger:** All Pages
+2. **Open the Load Order Manager** (Manage > Load Order)
+3. **Drag the Web Experiment tag into the "utag Sync" area** (Step 1 in the Load Order Manager). This is the synchronous loading zone — scripts placed here execute before any asynchronous tags.
+4. **Trigger:** All Pages
+
+> **Why utag Sync?** Tags in the utag Sync area load synchronously as part of `utag.js` itself (step 1), well before prioritized async tags (step 5). This guarantees `window.webExperiment` is available when the Unified Amplitude tag initializes.
 
 ### What it does
 
-This script loads the Web Experiment client and sets `window.webExperiment`. It must be synchronous to:
+This script loads the Web Experiment client and sets `window.webExperiment`. It must load synchronously to:
 - Avoid anti-flicker issues with visual experiments
 - Be available before the Analytics SDK initializes
+- Ensure Page Triggers ("On Event Tracked") work on the very first autocaptured page view
 
 ---
 
@@ -39,8 +41,8 @@ This script loads the Web Experiment client and sets `window.webExperiment`. It 
 ### Setup in Tealium iQ
 
 1. Upload the tag template (`tag_template_corrected.js`) as a **Custom Container** tag
-2. Set **Load Type** to **Asynchronous**
-3. Set **Load Order** after Tag 1
+2. In the **Load Order Manager**, place this tag in the **"Tags priorisés"** area (Step 5) — this is the default async loading zone. It will automatically execute after utag Sync (where Tag 1 lives).
+3. **Do not** place this tag in utag Sync — it must load asynchronously
 
 ### Configuration Variables
 
