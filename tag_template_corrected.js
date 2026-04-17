@@ -262,7 +262,6 @@ try {
           elementInteractions: u.setDefaultValue(d.elementInteractions)
         },
         deviceId: d.deviceId,
-        sessionId: d.sessionId ? Number(d.sessionId) : undefined,
         cookieOptions: u.clearEmptyKeys({
             domain: d.domain,
             expiration: d.expiration,
@@ -416,7 +415,6 @@ try {
         autocapture: true,
         elementInteractions: "",
         deviceId: "",
-        sessionId: "",
         flushIntervalMillis: "",
         flushQueueSize: "",
         flushMaxRetries: "",
