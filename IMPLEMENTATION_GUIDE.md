@@ -96,47 +96,74 @@ This guarantees that Web Experiment Page Triggers ("On Event Tracked") work on t
 
 ## Cross-Domain Session Continuity
 
-When a user navigates from one domain (e.g. `sosh.fr`) to another (e.g. `orange.fr`), Amplitude starts a new session by default because the second domain has no stored session state.
+When a user navigates from one domain (e.g. `sosh.fr`) to another (e.g. `orange.fr`), Amplitude starts a new session by default because the second domain has no stored session state. To preserve the session, three values must be carried over: **sessionId**, **deviceId**, and **lastEventTime**.
 
-### URL Parameters
+### Why `lastEventTime` matters
 
-Decorate outbound cross-domain links with three URL parameters:
+The SDK reads `ampSessionId` from the URL and calls `setSessionId(ampSessionId)`. Internally, this sets `lastEventTime = sessionId` (the session *start* timestamp, not the last activity time). For a session that started more than 30 minutes ago but was still active on the source domain, the destination domain computes `Date.now() - lastEventTime > 30 min` and opens a new session — even though the user was active moments before following the link. Passing `lastEventTime` fixes this.
 
-| Parameter | Source | Description |
-|-----------|--------|-------------|
-| `ampSessionId` | `amplitude.getSessionId()` | Session ID to resume (SDK-native) |
-| `ampDeviceId` | `amplitude.getDeviceId()` | Device ID to carry over (SDK-native) |
-| `amp_last_event_time` | `amplitude.config.lastEventTime` | True last activity timestamp (tag-level) |
+### Two supported approaches
 
-**Example decorated URL:**
+The tag supports both URL parameters and Tealium data layer mapping. **Data layer values take priority over URL parameters** — if both are set, the data layer wins silently.
+
+#### Approach A — URL parameters (simplest)
+
+Decorate outbound cross-domain links with three query parameters:
+
+| Parameter | Source on origin domain | Handled by |
+|-----------|-------------------------|------------|
+| `ampSessionId` | `amplitude.getSessionId()` | SDK (native) |
+| `ampDeviceId` | `amplitude.getDeviceId()` | SDK (native) |
+| `amp_last_event_time` | `amplitude.config.lastEventTime` | Tag |
+
+Example:
 ```
 https://orange.fr/page?ampSessionId=1713350400000&ampDeviceId=abc123&amp_last_event_time=1713352600000
 ```
 
-### Why `amp_last_event_time` is needed
+No Tealium data layer mapping required. Just decorate the link on the source domain before navigation.
 
-The Amplitude SDK reads `ampSessionId` from the URL and calls `setSessionId(ampSessionId)`. Internally, this sets `lastEventTime = sessionId` (the session *start* timestamp). For a session that started more than 30 minutes ago but was still active on the source domain, the destination domain then sees `Date.now() - lastEventTime > 30 min` and opens a new session — even though the user was active moments before following the link.
+#### Approach B — Tealium data layer
 
-`amp_last_event_time` provides the true last activity time. The tag restores it synchronously after `amplitude.init()` returns (but before the async plugin setup fires `[Amplitude] Page Viewed`), preventing the false session expiry.
+Map three data layer variables in the tag configuration (Data Mappings section):
 
-### What to read on the source domain
+| Data Layer Variable | Maps To | Source on origin domain |
+|---------------------|---------|-------------------------|
+| Your session ID variable | `sessionId` | `amplitude.getSessionId()` |
+| Your device ID variable | `deviceId` | `amplitude.getDeviceId()` |
+| Your last event time variable | `lastEventTime` | `amplitude.config.lastEventTime` |
+
+Use this approach when the session identifier must come from a controlled source (login system, CRM, custom logic) rather than from URL parameters.
+
+### How to read the values on the source domain
 
 ```javascript
-var sessionId = amplitude.getSessionId();          // e.g. 1713350400000
-var deviceId  = amplitude.getDeviceId();           // e.g. "abc123XYZ"
-var lastEventTime = amplitude.config.lastEventTime; // e.g. 1713352600000
+var sessionId     = amplitude.getSessionId();          // e.g. 1713350400000
+var deviceId      = amplitude.getDeviceId();           // e.g. "abc123XYZ"
+var lastEventTime = amplitude.config.lastEventTime;    // e.g. 1713352600000
 ```
 
-Append these as query parameters to every cross-domain link before the user follows it.
+Inject these into the outbound URL (Approach A) or push them into the Tealium data layer (Approach B) at the moment of navigation.
+
+### Important: do not mix both approaches for the same event
+
+If both URL parameters *and* data layer mappings provide a `sessionId` (or `lastEventTime`), **the data layer value silently overrides the URL**. Pick one source per event to avoid confusion. If the data layer mapping is left empty, the SDK/tag automatically falls back to URL parameters.
 
 ### Verification
 
-In DevTools console on the destination domain (filter for `utag`):
+Console on destination domain (filter for `utag`):
 ```
 utag ##UTID##: Cross-domain lastEventTime restored: 1713352600000
 ```
 
-In Amplitude Live Events, the `[Amplitude] Page Viewed` event on the destination domain should carry the **same session ID** as the source domain events.
+Live Events in Amplitude: the `[Amplitude] Page Viewed` event on the destination domain should carry the **same session ID** as the source domain events — no `session_end` / `session_start` pair at arrival.
+
+### Scope of the fix
+
+| Session age at handoff | Without `lastEventTime` | With `lastEventTime` |
+|---|---|---|
+| < 30 min | ✅ resumed correctly | ✅ resumed correctly |
+| > 30 min (user active) | ❌ new session created | ✅ resumed correctly |
 
 ---
 

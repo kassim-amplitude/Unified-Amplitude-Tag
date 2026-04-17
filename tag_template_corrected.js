@@ -3,7 +3,7 @@
 //~~tc: Updated defaultTracking with autocapture
 //~~tc: Created new tag Amplitude Browser SDK
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
-//~~tc: Cross-domain session continuity: restore amp_last_event_time after init() to prevent false session expiry on destination domain
+//~~tc: Cross-domain session continuity: support sessionId + lastEventTime via both data layer mapping and URL parameters (ampSessionId / amp_last_event_time)
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -263,6 +263,9 @@ try {
           elementInteractions: u.setDefaultValue(d.elementInteractions)
         },
         deviceId: d.deviceId,
+        // Optional: force sessionId from the data layer. If empty, clearEmptyKeys removes it
+        // and the SDK falls back to the native ampSessionId URL parameter.
+        sessionId: d.sessionId ? Number(d.sessionId) : undefined,
         cookieOptions: u.clearEmptyKeys({
             domain: d.domain,
             expiration: d.expiration,
@@ -317,25 +320,33 @@ try {
 
       // Cross-domain session continuity: restore lastEventTime
       //
-      // Problem: when ampSessionId is in the URL, the SDK calls setSessionId(ampSessionId),
-      // which sets lastEventTime = sessionId (the session *start* timestamp). For a session
-      // that started >30 min ago but was still active on the source domain, this makes the
-      // SDK think the session has timed out and it opens a new one.
+      // Problem: when a sessionId is passed (via amplConfig.sessionId from data layer, or via
+      // the ampSessionId URL parameter), the SDK calls setSessionId(), which sets
+      // lastEventTime = sessionId (the session *start* timestamp). For a session that started
+      // >30 min ago but was still active on the source domain, this makes the SDK think the
+      // session has timed out and it opens a new one.
       //
-      // Fix: the source domain passes amp_last_event_time (the true last activity timestamp)
-      // in the URL alongside ampSessionId. We restore it synchronously here — after
-      // setSessionId() has run (sync inside init()) but before plugin setup fires Page Viewed
-      // (async, Promise microtask). This prevents the false session expiry on the destination domain.
+      // Fix: the source domain passes the true lastEventTime — either via the data layer
+      // (d.lastEventTime) or via the amp_last_event_time URL parameter. We restore it
+      // synchronously here — after setSessionId() has run (sync inside init()) but before
+      // plugin setup fires Page Viewed (async Promise microtask). Data layer wins if both
+      // are present, mirroring the sessionId priority (amplConfig.sessionId > ampSessionId URL).
       (function () {
         try {
-          var letMatch = window.location.search.match(/[?&]amp_last_event_time=(\d+)/);
-          if (letMatch && amplitude.config) {
-            var letMs = parseInt(letMatch[1], 10);
-            // Only apply if it's a valid timestamp within a 30-minute window
-            if (!isNaN(letMs) && (Date.now() - letMs) < 1800000) {
-              amplitude.config.lastEventTime = letMs;
-              utag.DB("utag ##UTID##: Cross-domain lastEventTime restored: " + letMs);
-            }
+          var letMs = null;
+          // 1. Data layer (highest priority)
+          if (d.lastEventTime) {
+            letMs = Number(d.lastEventTime);
+          }
+          // 2. URL parameter fallback
+          if (!letMs || isNaN(letMs)) {
+            var letMatch = window.location.search.match(/[?&]amp_last_event_time=(\d+)/);
+            if (letMatch) letMs = parseInt(letMatch[1], 10);
+          }
+          // 3. Apply if valid and within the 30-minute session timeout window
+          if (letMs && !isNaN(letMs) && amplitude.config && (Date.now() - letMs) < 1800000) {
+            amplitude.config.lastEventTime = letMs;
+            utag.DB("utag ##UTID##: Cross-domain lastEventTime restored: " + letMs);
           }
         } catch (e) {}
       })();
@@ -442,6 +453,9 @@ try {
         autocapture: true,
         elementInteractions: "",
         deviceId: "",
+        // Cross-domain session continuity (optional — map from data layer if not using URL params)
+        sessionId: "",
+        lastEventTime: "",
         flushIntervalMillis: "",
         flushQueueSize: "",
         flushMaxRetries: "",
