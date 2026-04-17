@@ -3,7 +3,7 @@
 //~~tc: Updated defaultTracking with autocapture
 //~~tc: Created new tag Amplitude Browser SDK
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
-//~~tc: Added sessionId support in init config for cross-domain session persistence
+//~~tc: Fixed sessionId cross-domain handling: apply via setSessionId() after init, not in init config, to prevent immediate session expiry
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -263,7 +263,6 @@ try {
           elementInteractions: u.setDefaultValue(d.elementInteractions)
         },
         deviceId: d.deviceId,
-        sessionId: d.sessionId ? Number(d.sessionId) : undefined,
         cookieOptions: u.clearEmptyKeys({
             domain: d.domain,
             expiration: d.expiration,
@@ -315,6 +314,13 @@ try {
 
       // --- Initialize Amplitude (autocaptured page views fire after this) ---
       var initResult = amplitude.init(d.api_key, customerId, u.clearEmptyKeys(amplConfig));
+      // Apply cross-domain sessionId AFTER init via setSessionId(), not via init config.
+      // Passing sessionId in init config causes immediate session expiry on new domains
+      // because there is no stored lastEventTime. setSessionId() sets the id AND refreshes
+      // lastEventTime to now, preventing the session_end → new session race condition.
+      if (d.sessionId) {
+        amplitude.setSessionId(Number(d.sessionId));
+      }
       if (initResult && initResult.promise && typeof initResult.promise.then === "function") {
         initResult.promise.then(function () {
           u.amplitudeReady = true;
