@@ -57,7 +57,7 @@ Set these in the tag configuration panel:
 | `web_experiment` | `true` or `false` | Yes |
 | `sdk_version` | Leave empty (hardcoded to zoning build) | No |
 
-**For Orange:** Set `web_experiment` to `true` since you use the two-tag setup with the synchronous experiment script.
+**If using the two-tag setup:** Set `web_experiment` to `true` since the synchronous experiment script is loaded separately.
 
 ### Data Layer Mappings
 

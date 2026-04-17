@@ -187,7 +187,7 @@ try {
     // then calls u.loaderCallback() which registers plugins and calls amplitude.init().
     // Sequencing: SR script + G&S script + webExperiment poll → register all → init
     u.sdkLoaderCallback = function () {
-      // Orange uses EU data residency — always use cdn.eu.amplitude.com for script assets.
+      // EU data residency — always use cdn.eu.amplitude.com for script assets.
       var cdnBase = "https://cdn.eu.amplitude.com";
       var sessionReplayUrl = cdnBase + "/libs/plugin-session-replay-browser-##session_replay_version##-min.js.gz".replace("##session_replay_version##", u.data.session_replay_version);
 
