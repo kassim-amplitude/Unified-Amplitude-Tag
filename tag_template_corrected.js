@@ -3,7 +3,7 @@
 //~~tc: Updated defaultTracking with autocapture
 //~~tc: Created new tag Amplitude Browser SDK
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
-//~~tc: Cross-domain session continuity: use ampSessionId URL parameter (SDK-native, applied before autocapture fires)
+//~~tc: Cross-domain session continuity: restore amp_last_event_time after init() to prevent false session expiry on destination domain
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -314,6 +314,32 @@ try {
 
       // --- Initialize Amplitude (autocaptured page views fire after this) ---
       var initResult = amplitude.init(d.api_key, customerId, u.clearEmptyKeys(amplConfig));
+
+      // Cross-domain session continuity: restore lastEventTime
+      //
+      // Problem: when ampSessionId is in the URL, the SDK calls setSessionId(ampSessionId),
+      // which sets lastEventTime = sessionId (the session *start* timestamp). For a session
+      // that started >30 min ago but was still active on the source domain, this makes the
+      // SDK think the session has timed out and it opens a new one.
+      //
+      // Fix: the source domain passes amp_last_event_time (the true last activity timestamp)
+      // in the URL alongside ampSessionId. We restore it synchronously here — after
+      // setSessionId() has run (sync inside init()) but before plugin setup fires Page Viewed
+      // (async, Promise microtask). This prevents the false session expiry on the destination domain.
+      (function () {
+        try {
+          var letMatch = window.location.search.match(/[?&]amp_last_event_time=(\d+)/);
+          if (letMatch && amplitude.config) {
+            var letMs = parseInt(letMatch[1], 10);
+            // Only apply if it's a valid timestamp within a 30-minute window
+            if (!isNaN(letMs) && (Date.now() - letMs) < 1800000) {
+              amplitude.config.lastEventTime = letMs;
+              utag.DB("utag ##UTID##: Cross-domain lastEventTime restored: " + letMs);
+            }
+          }
+        } catch (e) {}
+      })();
+
       if (initResult && initResult.promise && typeof initResult.promise.then === "function") {
         initResult.promise.then(function () {
           u.amplitudeReady = true;

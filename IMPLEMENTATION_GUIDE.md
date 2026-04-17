@@ -94,6 +94,52 @@ This guarantees that Web Experiment Page Triggers ("On Event Tracked") work on t
 
 ---
 
+## Cross-Domain Session Continuity
+
+When a user navigates from one domain (e.g. `sosh.fr`) to another (e.g. `orange.fr`), Amplitude starts a new session by default because the second domain has no stored session state.
+
+### URL Parameters
+
+Decorate outbound cross-domain links with three URL parameters:
+
+| Parameter | Source | Description |
+|-----------|--------|-------------|
+| `ampSessionId` | `amplitude.getSessionId()` | Session ID to resume (SDK-native) |
+| `ampDeviceId` | `amplitude.getDeviceId()` | Device ID to carry over (SDK-native) |
+| `amp_last_event_time` | `amplitude.config.lastEventTime` | True last activity timestamp (tag-level) |
+
+**Example decorated URL:**
+```
+https://orange.fr/page?ampSessionId=1713350400000&ampDeviceId=abc123&amp_last_event_time=1713352600000
+```
+
+### Why `amp_last_event_time` is needed
+
+The Amplitude SDK reads `ampSessionId` from the URL and calls `setSessionId(ampSessionId)`. Internally, this sets `lastEventTime = sessionId` (the session *start* timestamp). For a session that started more than 30 minutes ago but was still active on the source domain, the destination domain then sees `Date.now() - lastEventTime > 30 min` and opens a new session — even though the user was active moments before following the link.
+
+`amp_last_event_time` provides the true last activity time. The tag restores it synchronously after `amplitude.init()` returns (but before the async plugin setup fires `[Amplitude] Page Viewed`), preventing the false session expiry.
+
+### What to read on the source domain
+
+```javascript
+var sessionId = amplitude.getSessionId();          // e.g. 1713350400000
+var deviceId  = amplitude.getDeviceId();           // e.g. "abc123XYZ"
+var lastEventTime = amplitude.config.lastEventTime; // e.g. 1713352600000
+```
+
+Append these as query parameters to every cross-domain link before the user follows it.
+
+### Verification
+
+In DevTools console on the destination domain (filter for `utag`):
+```
+utag ##UTID##: Cross-domain lastEventTime restored: 1713352600000
+```
+
+In Amplitude Live Events, the `[Amplitude] Page Viewed` event on the destination domain should carry the **same session ID** as the source domain events.
+
+---
+
 ## Verification Checklist
 
 After publishing, verify in the browser DevTools:
