@@ -3,6 +3,7 @@
 //~~tc: Updated defaultTracking with autocapture
 //~~tc: Created new tag Amplitude Browser SDK
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
+//~~tc: Added sessionId support in init config for cross-domain session persistence
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
