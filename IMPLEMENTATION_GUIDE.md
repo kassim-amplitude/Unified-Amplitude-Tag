@@ -96,7 +96,7 @@ This guarantees that Web Experiment Page Triggers ("On Event Tracked") work on t
 
 ## Cross-Domain Session Continuity
 
-When a user navigates from one domain (e.g. `sosh.fr`) to another (e.g. `orange.fr`), Amplitude starts a new session by default because the second domain has no stored session state. To preserve the session, three values must be carried over: **sessionId**, **deviceId**, and **lastEventTime**.
+When a user navigates from one domain (e.g. `a.example.com`) to another (e.g. `b.example.com`), Amplitude starts a new session by default because the second domain has no stored session state. To preserve the session, three values must be carried over: **sessionId**, **deviceId**, and **lastEventTime**.
 
 ### Why `lastEventTime` matters
 
@@ -118,7 +118,7 @@ Decorate outbound cross-domain links with three query parameters:
 
 Example:
 ```
-https://orange.fr/page?ampSessionId=1713350400000&ampDeviceId=abc123&amp_last_event_time=1713352600000
+https://b.example.com/page?ampSessionId=1713350400000&ampDeviceId=abc123&amp_last_event_time=1713352600000
 ```
 
 No Tealium data layer mapping required. Just decorate the link on the source domain before navigation.
