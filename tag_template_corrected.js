@@ -4,6 +4,7 @@
 //~~tc: Created new tag Amplitude Browser SDK
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
 //~~tc: Cross-domain session continuity: support sessionId + lastEventTime via both data layer mapping and URL parameters (ampSessionId / amp_last_event_time)
+//~~tc: Cross-domain: route URL params (ampSessionId / ampDeviceId / ampLastEventTime | amp_last_event_time) through amplConfig instead of SDK-native URL reader. This avoids setSessionId() being called internally, which was emitting a parasitic session_start on the destination domain even when the session was still active.
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -246,6 +247,28 @@ try {
       // Use the captured config snapshot to avoid stale u.data if multiple events fired
       var d = (initConfig && initConfig.data) ? initConfig.data : u.data;
 
+      // Cross-domain: read URL params into d.* BEFORE building amplConfig so the values
+      // flow through the SDK's `config.sessionId` / `config.deviceId` path (which takes
+      // precedence over the native ampSessionId URL reader). Routing through config avoids
+      // the SDK's internal setSessionId() call, which would emit a parasitic session_start
+      // on the destination domain even for a still-active session.
+      // Data layer values stay prioritary — the `if (!d.xxx)` guards preserve them.
+      try {
+        var qs = window.location.search;
+        if (!d.sessionId) {
+          var mSid = qs.match(/[?&]ampSessionId=(\d+)/);
+          if (mSid) d.sessionId = mSid[1];
+        }
+        if (!d.deviceId) {
+          var mDid = qs.match(/[?&]ampDeviceId=([^&]+)/);
+          if (mDid) d.deviceId = decodeURIComponent(mDid[1]);
+        }
+        if (!d.lastEventTime) {
+          var mLet = qs.match(/[?&](?:ampLastEventTime|amp_last_event_time)=(\d+)/);
+          if (mLet) d.lastEventTime = mLet[1];
+        }
+      } catch (e) {}
+
       var amplConfig = {
         flushIntervalMillis: d.flushIntervalMillis,
         flushQueueSize: d.flushQueueSize,
@@ -340,7 +363,7 @@ try {
           }
           // 2. URL parameter fallback
           if (!letMs || isNaN(letMs)) {
-            var letMatch = window.location.search.match(/[?&]amp_last_event_time=(\d+)/);
+            var letMatch = window.location.search.match(/[?&](?:ampLastEventTime|amp_last_event_time)=(\d+)/);
             if (letMatch) letMs = parseInt(letMatch[1], 10);
           }
           // 3. Apply if valid and within the 30-minute session timeout window

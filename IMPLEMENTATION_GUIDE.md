@@ -112,16 +112,20 @@ Decorate outbound cross-domain links with three query parameters:
 
 | Parameter | Source on origin domain | Handled by |
 |-----------|-------------------------|------------|
-| `ampSessionId` | `amplitude.getSessionId()` | SDK (native) |
-| `ampDeviceId` | `amplitude.getDeviceId()` | SDK (native) |
-| `amp_last_event_time` | `amplitude.config.lastEventTime` | Tag |
+| `ampSessionId` | `amplitude.getSessionId()` | Tag (routed to `config.sessionId`) |
+| `ampDeviceId` | `amplitude.getDeviceId()` | Tag (routed to `config.deviceId`) |
+| `ampLastEventTime` *(or `amp_last_event_time`)* | `amplitude.config.lastEventTime` | Tag |
 
 Example:
 ```
-https://b.example.com/page?ampSessionId=1713350400000&ampDeviceId=abc123&amp_last_event_time=1713352600000
+https://b.example.com/page?ampSessionId=1713350400000&ampDeviceId=abc123&ampLastEventTime=1713352600000
 ```
 
 No Tealium data layer mapping required. Just decorate the link on the source domain before navigation.
+
+> **Why the tag reads the URL itself (not the SDK's native reader):** if the SDK ingests `ampSessionId` directly from the URL, it calls `setSessionId()` internally, which **always** emits a `session_start` on the destination domain — even when the session is still active. The tag therefore parses the URL before `amplitude.init()` and feeds the values into `config.sessionId` / `config.deviceId` / `config.lastEventTime`, which take precedence over the URL. `setSessionId()` is never called, and no parasitic `session_start` fires.
+>
+> Both `ampLastEventTime` (camelCase, recommended for naming consistency with `ampSessionId` / `ampDeviceId`) and `amp_last_event_time` (snake_case, backward-compatible) are accepted.
 
 #### Approach B — Tealium data layer
 
@@ -156,7 +160,9 @@ Console on destination domain (filter for `utag`):
 utag ##UTID##: Cross-domain lastEventTime restored: 1713352600000
 ```
 
-Live Events in Amplitude: the `[Amplitude] Page Viewed` event on the destination domain should carry the **same session ID** as the source domain events — no `session_end` / `session_start` pair at arrival.
+Live Events in Amplitude: the `[Amplitude] Page Viewed` event on the destination domain should carry the **same session ID** as the source domain events — **no `[Amplitude] Session Start` and no `[Amplitude] Session End`** at arrival.
+
+> **Timestamp unit:** `lastEventTime` must be in **milliseconds** (13 digits, the format returned by `Date.now()` and `amplitude.config.lastEventTime`). A 10-digit value (seconds) will be silently rejected by the 30-minute validity check.
 
 ### Scope of the fix
 
