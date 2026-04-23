@@ -5,7 +5,7 @@
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
 //~~tc: Cross-domain session continuity: support sessionId + lastEventTime via both data layer mapping and URL parameters (ampSessionId / amp_last_event_time)
 //~~tc: Cross-domain: route URL params (ampSessionId / ampDeviceId / ampLastEventTime | amp_last_event_time) through amplConfig instead of SDK-native URL reader. This avoids setSessionId() being called internally, which was emitting a parasitic session_start on the destination domain even when the session was still active.
-//~~tc: Cross-domain: pre-seed the Amplitude storage entry (AMP_<apiKey10>) with {sessionId, deviceId, lastEventTime} BEFORE amplitude.init() so the SDK's createConfig reads the restored lastEventTime from storage (the only path it reads from — options.lastEventTime is ignored by createConfig). This prevents the session-tracking plugin from emitting a parasitic session_start when the destination-domain cookie is empty on arrival.
+//~~tc: Cross-domain: pre-seed the Amplitude storage entry (AMP_<apiKey10>) with {sessionId, deviceId, lastEventTime} BEFORE amplitude.init() so the SDK's createConfig reads the restored lastEventTime from storage (the only path it reads from — options.lastEventTime is ignored by createConfig). Cookie format matches SDK: btoa(encodeURIComponent(JSON.stringify(payload))). localStorage/sessionStorage use plain JSON.stringify. Backend is selected by identityStorage (no cross-backend fallback). Non-clobber guard: skip the seed if an existing entry has a newer lastEventTime than the URL value (prevents stale decorated links from rewinding a live session). This prevents the parasitic session_start when the destination-domain cookie is empty on arrival.
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -341,82 +341,130 @@ try {
 
       // Cross-domain session continuity: pre-seed the Amplitude storage entry.
       //
-      // Why: the SDK's createConfig (analytics-browser/src/config.ts) reads `lastEventTime`
-      // ONLY from the previous-cookies object. It does NOT read options.lastEventTime.
-      // So the only way to restore `lastEventTime` before the session-tracking plugin's
-      // first evaluation is to write it into Amplitude's storage slot BEFORE init() runs.
+      // Why: the SDK's createConfig (analytics-browser/src/config.ts:341) reads
+      // `lastEventTime` ONLY from previousCookies in storage. It does NOT read
+      // options.lastEventTime — that path is silently discarded (config.ts:356).
+      // So the only way to restore `lastEventTime` before the session-tracking
+      // logic's first evaluation is to write it into Amplitude's storage slot
+      // BEFORE amplitude.init() runs.
       //
-      // Storage key: "AMP_" + first 10 chars of api_key.
-      // Value: base64(JSON.stringify({ deviceId, sessionId, lastEventTime, ... })).
-      // The SDK reads this from cookie first, then localStorage fallback — we write both
-      // to be safe regardless of the integrator's identityStorage config.
-      (function () {
+      // Storage key: "AMP_" + first 10 chars of api_key (cookie-name.ts:3-5).
+      // Selected backend depends on options.identityStorage (default "cookie");
+      // the SDK does NOT fall back between backends, so we must match the
+      // integrator's configuration exactly.
+      //
+      // Cookie encoding: btoa(encodeURIComponent(JSON.stringify(payload)))
+      //   (analytics-client-common/src/storage/cookie.ts:72)
+      // localStorage / sessionStorage encoding: plain JSON.stringify(payload)
+      //   (analytics-core/src/storage/browser-storage.ts:47)
+      //
+      // Non-clobber guard: if an existing storage entry has a `lastEventTime`
+      // at least as recent as the URL's, we KEEP it. This prevents a stale
+      // decorated link (e.g. opened from an old email) from rewinding a user's
+      // live session.
+      (function preSeedAmpStorage() {
         try {
-          var sid = d.sessionId ? Number(d.sessionId) : null;
-          var did = d.deviceId || null;
-          var letMs = d.lastEventTime ? Number(d.lastEventTime) : null;
-          // Only seed if we have at least sessionId + a valid lastEventTime within the session window
-          if (!sid || !letMs || isNaN(letMs) || (Date.now() - letMs) >= 1800000) return;
+          var urlSid = d.sessionId ? Number(d.sessionId) : null;
+          var urlDid = d.deviceId || null;
+          var urlLet = d.lastEventTime ? Number(d.lastEventTime) : null;
+          // Require all three values; reject malformed or stale lastEventTime (> 30 min).
+          if (!urlSid || isNaN(urlSid)) return;
+          if (!urlDid) return;
+          if (!urlLet || isNaN(urlLet)) return;
+          if ((Date.now() - urlLet) >= 1800000) return;
+          // lastEventTime must be a 13-digit ms timestamp (not seconds).
+          if (urlLet < 1e12) return;
+
           var storageKey = "AMP_" + String(d.api_key || "").slice(0, 10);
+          var identityStorage = d.identityStorage || "cookie";
+          if (identityStorage === "none") return; // SDK uses MemoryStorage — nothing to seed
+
+          // --- Read existing payload for non-clobber guard ---
+          var existing = null;
+          try {
+            if (identityStorage === "cookie") {
+              var re = new RegExp("(?:^|; )" + storageKey + "=([^;]+)");
+              var m = document.cookie.match(re);
+              if (m && m[1]) {
+                try { existing = JSON.parse(decodeURIComponent(atob(m[1]))); } catch (_dec) { existing = null; }
+              }
+            } else if (identityStorage === "localStorage" && window.localStorage) {
+              var rawLs = window.localStorage.getItem(storageKey);
+              if (rawLs) { try { existing = JSON.parse(rawLs); } catch (_lsParse) { existing = null; } }
+            } else if (identityStorage === "sessionStorage" && window.sessionStorage) {
+              var rawSs = window.sessionStorage.getItem(storageKey);
+              if (rawSs) { try { existing = JSON.parse(rawSs); } catch (_ssParse) { existing = null; } }
+            }
+          } catch (_readErr) { existing = null; }
+
+          // Non-clobber: if existing session is at least as fresh as the URL value, keep it.
+          if (existing && typeof existing.lastEventTime === "number" && !isNaN(existing.lastEventTime)) {
+            if (existing.lastEventTime >= urlLet) {
+              utag.DB("utag ##UTID##: Cross-domain pre-seed skipped — existing session is fresher (existing.let=" + existing.lastEventTime + " >= url.let=" + urlLet + ")");
+              return;
+            }
+          }
+
+          // Build payload matching UserSession shape (analytics-core user-session.ts).
+          // Preserve existing identifiers where possible to avoid breaking attribution/counters.
           var payload = {
-            deviceId: did || undefined,
-            userId: customerId || undefined,
-            sessionId: sid,
-            optOut: false,
-            lastEventTime: letMs,
-            lastEventId: 0,
-            pageCounter: 0
+            deviceId: urlDid,
+            userId: (existing && existing.userId) || customerId || undefined,
+            sessionId: urlSid,
+            optOut: (existing && typeof existing.optOut === "boolean") ? existing.optOut : false,
+            lastEventTime: urlLet,
+            lastEventId: (existing && typeof existing.lastEventId === "number") ? existing.lastEventId : 0,
+            pageCounter: (existing && typeof existing.pageCounter === "number") ? existing.pageCounter : 0,
+            cookieDomain: (existing && existing.cookieDomain) || undefined
           };
-          var encoded;
-          try {
-            // SDK format: base64 of the raw JSON (UTF-8 safe for ASCII payloads here)
-            encoded = btoa(JSON.stringify(payload));
-          } catch (encErr) { return; }
-          // Write cookie (path=/, 1 year, best-effort on the apex domain if provided)
-          try {
-            var cookieParts = [storageKey + "=" + encoded, "path=/", "max-age=31536000", "SameSite=Lax"];
-            if (d.domain) cookieParts.push("domain=" + d.domain);
-            document.cookie = cookieParts.join("; ");
-          } catch (cErr) {}
-          // Write localStorage fallback
-          try { window.localStorage.setItem(storageKey, encoded); } catch (lsErr) {}
-          utag.DB("utag ##UTID##: Cross-domain storage pre-seeded for sid=" + sid + " let=" + letMs);
-        } catch (e) {}
+
+          // --- Write to the correct backend ---
+          if (identityStorage === "cookie") {
+            var encoded;
+            try {
+              encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
+            } catch (_encErr) { return; }
+            try {
+              var exp = new Date(Date.now() + 365 * 24 * 3600 * 1000).toUTCString();
+              var parts = [storageKey + "=" + encoded, "path=/", "expires=" + exp, "SameSite=Lax"];
+              // Match the SDK's cookie domain: prefer integrator-provided d.domain,
+              // else the existing cookie's cookieDomain (set by SDK on a prior visit),
+              // else leave host-only (document.cookie read is not domain-filtered,
+              // so the SDK will still find our cookie at init-time storage read).
+              var dom = d.domain || (existing && existing.cookieDomain) || null;
+              if (dom) parts.push("domain=" + dom);
+              if (d.secure) parts.push("Secure");
+              document.cookie = parts.join("; ");
+            } catch (_cErr) {}
+          } else if (identityStorage === "localStorage" && window.localStorage) {
+            try { window.localStorage.setItem(storageKey, JSON.stringify(payload)); } catch (_lsErr) {}
+          } else if (identityStorage === "sessionStorage" && window.sessionStorage) {
+            try { window.sessionStorage.setItem(storageKey, JSON.stringify(payload)); } catch (_ssErr) {}
+          }
+
+          utag.DB("utag ##UTID##: Cross-domain storage pre-seeded (sid=" + urlSid + ", let=" + urlLet + ", storage=" + identityStorage + ")");
+        } catch (e) {
+          try { utag.DB("utag ##UTID##: pre-seed error: " + e); } catch (_) {}
+        }
       })();
 
       // --- Initialize Amplitude (autocaptured page views fire after this) ---
       var initResult = amplitude.init(d.api_key, customerId, u.clearEmptyKeys(amplConfig));
 
-      // Cross-domain session continuity: restore lastEventTime
-      //
-      // Problem: when a sessionId is passed (via amplConfig.sessionId from data layer, or via
-      // the ampSessionId URL parameter), the SDK calls setSessionId(), which sets
-      // lastEventTime = sessionId (the session *start* timestamp). For a session that started
-      // >30 min ago but was still active on the source domain, this makes the SDK think the
-      // session has timed out and it opens a new one.
-      //
-      // Fix: the source domain passes the true lastEventTime — either via the data layer
-      // (d.lastEventTime) or via the amp_last_event_time URL parameter. We restore it
-      // synchronously here — after setSessionId() has run (sync inside init()) but before
-      // plugin setup fires Page Viewed (async Promise microtask). Data layer wins if both
-      // are present, mirroring the sessionId priority (amplConfig.sessionId > ampSessionId URL).
+      // Post-init belt-and-suspenders: if amplitude.config.lastEventTime ended up
+      // OLDER than our URL value (can happen when pre-seed was blocked by an
+      // in-memory-only storage or a platform-specific cookie restriction), bump
+      // it forward — but never backward (never rewind a fresher session).
       (function () {
         try {
-          var letMs = null;
-          // 1. Data layer (highest priority)
-          if (d.lastEventTime) {
-            letMs = Number(d.lastEventTime);
-          }
-          // 2. URL parameter fallback
-          if (!letMs || isNaN(letMs)) {
-            var letMatch = window.location.search.match(/[?&](?:ampLastEventTime|amp_last_event_time)=(\d+)/);
-            if (letMatch) letMs = parseInt(letMatch[1], 10);
-          }
-          // 3. Apply if valid and within the 30-minute session timeout window
-          if (letMs && !isNaN(letMs) && amplitude.config && (Date.now() - letMs) < 1800000) {
-            amplitude.config.lastEventTime = letMs;
-            utag.DB("utag ##UTID##: Cross-domain lastEventTime restored: " + letMs);
-          }
+          var letMs = d.lastEventTime ? Number(d.lastEventTime) : null;
+          if (!letMs || isNaN(letMs)) return;
+          if ((Date.now() - letMs) >= 1800000) return;
+          if (!amplitude.config) return;
+          var current = amplitude.config.lastEventTime;
+          if (typeof current === "number" && !isNaN(current) && current >= letMs) return; // non-clobber
+          amplitude.config.lastEventTime = letMs;
+          utag.DB("utag ##UTID##: Cross-domain lastEventTime bumped post-init: " + letMs);
         } catch (e) {}
       })();
 
