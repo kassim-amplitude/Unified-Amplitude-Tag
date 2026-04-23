@@ -1,6 +1,6 @@
 # Template Fix Test Protocol
 
-Apply this protocol before merging any change to `tag_template_corrected.js`. The goal is to catch regressions before the integrator (Orange Tealium) redeploys.
+Apply this protocol before merging any change to `tag_template_corrected.js`. The goal is to catch regressions before the integrator redeploys.
 
 ---
 
@@ -42,7 +42,7 @@ For any change that touches Amplitude SDK internals (storage, init config, plugi
 
 ---
 
-## 3. Live browser tests on shop.sosh.fr (or an Orange staging profile)
+## 3. Live browser tests on a deployed integrator page (production or staging)
 
 Use Claude Chrome extension (`mcp__Claude_in_Chrome__javascript_tool`) on the deployed tag. Each test:
 
@@ -92,13 +92,13 @@ window.__ampBodies = [];
 
 ---
 
-## 4. Post-deploy smoke test (after Orange re-uploads)
+## 4. Post-deploy smoke test (after the integrator re-uploads)
 
 - [ ] Live Events in Amplitude EU: confirm that a cross-domain navigation on a known test account produces **zero** extra `Session Start` events within 10 minutes of normal traffic.
 - [ ] Session counts in the target project: the daily count should not spike after deploy vs the day before.
 - [ ] `[Amplitude] Page Viewed` event count: should be stable (no drop from broken init).
 - [ ] Confirm `utag ##UTID##: Cross-domain storage pre-seeded for sid=…` appears in console on cross-domain arrivals.
-- [ ] Verify no new JS errors in Sentry / browser error logs on Orange side.
+- [ ] Verify no new JS errors in the integrator's error monitoring (Sentry / browser console).
 
 ---
 
@@ -113,4 +113,4 @@ If any smoke test fails:
 
 ## Changelog
 
-- `2026-04-23`: initial protocol (kassim)
+- `2026-04-23`: initial protocol
