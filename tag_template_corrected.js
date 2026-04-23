@@ -5,6 +5,7 @@
 //~~tc: Added Web Experiment plugin integration (polling + registration before init)
 //~~tc: Cross-domain session continuity: support sessionId + lastEventTime via both data layer mapping and URL parameters (ampSessionId / amp_last_event_time)
 //~~tc: Cross-domain: route URL params (ampSessionId / ampDeviceId / ampLastEventTime | amp_last_event_time) through amplConfig instead of SDK-native URL reader. This avoids setSessionId() being called internally, which was emitting a parasitic session_start on the destination domain even when the session was still active.
+//~~tc: Cross-domain: pre-seed the Amplitude storage entry (AMP_<apiKey10>) with {sessionId, deviceId, lastEventTime} BEFORE amplitude.init() so the SDK's createConfig reads the restored lastEventTime from storage (the only path it reads from — options.lastEventTime is ignored by createConfig). This prevents the session-tracking plugin from emitting a parasitic session_start when the destination-domain cookie is empty on arrival.
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -337,6 +338,51 @@ try {
       } else if (u.toBoolean(d.web_experiment)) {
         utag.DB("utag ##UTID##: Web Experiment plugin NOT available at init time — Page Triggers may not fire for autocaptured events");
       }
+
+      // Cross-domain session continuity: pre-seed the Amplitude storage entry.
+      //
+      // Why: the SDK's createConfig (analytics-browser/src/config.ts) reads `lastEventTime`
+      // ONLY from the previous-cookies object. It does NOT read options.lastEventTime.
+      // So the only way to restore `lastEventTime` before the session-tracking plugin's
+      // first evaluation is to write it into Amplitude's storage slot BEFORE init() runs.
+      //
+      // Storage key: "AMP_" + first 10 chars of api_key.
+      // Value: base64(JSON.stringify({ deviceId, sessionId, lastEventTime, ... })).
+      // The SDK reads this from cookie first, then localStorage fallback — we write both
+      // to be safe regardless of the integrator's identityStorage config.
+      (function () {
+        try {
+          var sid = d.sessionId ? Number(d.sessionId) : null;
+          var did = d.deviceId || null;
+          var letMs = d.lastEventTime ? Number(d.lastEventTime) : null;
+          // Only seed if we have at least sessionId + a valid lastEventTime within the session window
+          if (!sid || !letMs || isNaN(letMs) || (Date.now() - letMs) >= 1800000) return;
+          var storageKey = "AMP_" + String(d.api_key || "").slice(0, 10);
+          var payload = {
+            deviceId: did || undefined,
+            userId: customerId || undefined,
+            sessionId: sid,
+            optOut: false,
+            lastEventTime: letMs,
+            lastEventId: 0,
+            pageCounter: 0
+          };
+          var encoded;
+          try {
+            // SDK format: base64 of the raw JSON (UTF-8 safe for ASCII payloads here)
+            encoded = btoa(JSON.stringify(payload));
+          } catch (encErr) { return; }
+          // Write cookie (path=/, 1 year, best-effort on the apex domain if provided)
+          try {
+            var cookieParts = [storageKey + "=" + encoded, "path=/", "max-age=31536000", "SameSite=Lax"];
+            if (d.domain) cookieParts.push("domain=" + d.domain);
+            document.cookie = cookieParts.join("; ");
+          } catch (cErr) {}
+          // Write localStorage fallback
+          try { window.localStorage.setItem(storageKey, encoded); } catch (lsErr) {}
+          utag.DB("utag ##UTID##: Cross-domain storage pre-seeded for sid=" + sid + " let=" + letMs);
+        } catch (e) {}
+      })();
 
       // --- Initialize Amplitude (autocaptured page views fire after this) ---
       var initResult = amplitude.init(d.api_key, customerId, u.clearEmptyKeys(amplConfig));
