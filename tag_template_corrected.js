@@ -6,6 +6,7 @@
 //~~tc: Cross-domain session continuity: support sessionId + lastEventTime via both data layer mapping and URL parameters (ampSessionId / amp_last_event_time)
 //~~tc: Cross-domain: route URL params (ampSessionId / ampDeviceId / ampLastEventTime | amp_last_event_time) through amplConfig instead of SDK-native URL reader. This avoids setSessionId() being called internally, which was emitting a parasitic session_start on the destination domain even when the session was still active.
 //~~tc: Cross-domain: pre-seed the Amplitude storage entry (AMP_<apiKey10>) with {sessionId, deviceId, lastEventTime} BEFORE amplitude.init() so the SDK's createConfig reads the restored lastEventTime from storage (the only path it reads from — options.lastEventTime is ignored by createConfig). Cookie format matches SDK: btoa(encodeURIComponent(JSON.stringify(payload))). localStorage/sessionStorage use plain JSON.stringify. Backend is selected by identityStorage (no cross-backend fallback). Non-clobber guard: skip the seed if an existing entry has a newer lastEventTime than the URL value (prevents stale decorated links from rewinding a live session). This prevents the parasitic session_start when the destination-domain cookie is empty on arrival.
+//~~tc: Web Experiment plugin registration is now POST-init by default (verified working on SDK 2.34.1-feat-zoning-alpha.0 by Tim Yiu / Experiment team). Pre-init add was unreliable: the plugin never effectively attached and "On Event Tracked" Page Triggers silently failed. Integrators can opt back in to pre-init registration via a new config flag `web_experiment_pre_init` (default "false"). Use pre-init only if the plugin must observe autocaptured events that fire inside init's lifecycle.
 
 var amplitude = amplitude || { _q: [], _iq: {} };
 
@@ -315,28 +316,38 @@ try {
         customerId = d.userId;
       }
 
-      // --- Plugin Registration (ALL plugins BEFORE amplitude.init) ---
-      // This ordering is critical: Page Triggers ("On Event Tracked") in Web Experiment
-      // require the webExperiment plugin to be registered before autocaptured page views fire.
+      // --- Plugin Registration ---
+      // Session Replay and Guides & Surveys register BEFORE init (works reliably).
+      // Web Experiment registration timing is controlled by d.web_experiment_pre_init:
+      //   - default (false): register AFTER amplitude.init() resolves. Verified-working
+      //     path for "On Event Tracked" Page Triggers tied to custom (non-autocaptured)
+      //     events. Pre-init add of the Web Experiment plugin is unreliable on the
+      //     current SDK alpha (the plugin ends up not attached, so triggers never fire).
+      //   - "true": register BEFORE init (legacy behavior). Use this only if the
+      //     integrator needs the Web Experiment plugin to observe autocaptured events
+      //     that fire inside init's lifecycle (e.g. the first [Amplitude] Page Viewed).
+      var webExpPreInit = u.toBoolean(d.web_experiment_pre_init);
 
-      // 1. Session Replay plugin
+      // 1. Session Replay plugin (pre-init)
       if (u.toBoolean(d.session_replay) && window.sessionReplay && typeof window.sessionReplay.plugin === "function") {
         amplitude.add(window.sessionReplay.plugin());
-        utag.DB("utag ##UTID##: Session Replay plugin registered");
+        utag.DB("utag ##UTID##: Session Replay plugin registered (pre-init)");
       }
 
-      // 2. Guides & Surveys (Engagement) plugin
+      // 2. Guides & Surveys (Engagement) plugin (pre-init)
       if (u.toBoolean(d.guides_and_surveys) && window.engagement && typeof window.engagement.plugin === "function") {
         amplitude.add(window.engagement.plugin());
-        utag.DB("utag ##UTID##: Guides & Surveys plugin registered");
+        utag.DB("utag ##UTID##: Guides & Surveys plugin registered (pre-init)");
       }
 
-      // 3. Web Experiment plugin (loaded by external synchronous tag)
-      if (u.toBoolean(d.web_experiment) && window.webExperiment && typeof window.webExperiment.plugin === "function") {
-        amplitude.add(window.webExperiment.plugin());
-        utag.DB("utag ##UTID##: Web Experiment plugin registered");
-      } else if (u.toBoolean(d.web_experiment)) {
-        utag.DB("utag ##UTID##: Web Experiment plugin NOT available at init time — Page Triggers may not fire for autocaptured events");
+      // 3. Web Experiment plugin — pre-init path (opt-in via web_experiment_pre_init=true)
+      if (u.toBoolean(d.web_experiment) && webExpPreInit) {
+        if (window.webExperiment && typeof window.webExperiment.plugin === "function") {
+          amplitude.add(window.webExperiment.plugin());
+          utag.DB("utag ##UTID##: Web Experiment plugin registered (pre-init, opt-in)");
+        } else {
+          utag.DB("utag ##UTID##: Web Experiment plugin NOT available at pre-init time — Page Triggers may not fire for autocaptured events");
+        }
       }
 
       // Cross-domain session continuity: pre-seed the Amplitude storage entry.
@@ -468,8 +479,27 @@ try {
         } catch (e) {}
       })();
 
+      // Web Experiment plugin — post-init registration helper (default path).
+      // Runs after init resolves and BEFORE u.drain() flushes the queued events,
+      // so the plugin sits in the chain before the first custom page_view event
+      // is replayed through amplitude.track().
+      u.registerWebExperimentPostInit = function () {
+        try {
+          if (!u.toBoolean(d.web_experiment) || webExpPreInit) return;
+          if (!window.webExperiment || typeof window.webExperiment.plugin !== "function") {
+            utag.DB("utag ##UTID##: Web Experiment plugin NOT available at post-init time — Page Triggers will not fire");
+            return;
+          }
+          amplitude.add(window.webExperiment.plugin());
+          utag.DB("utag ##UTID##: Web Experiment plugin registered (post-init, default)");
+        } catch (e) {
+          try { utag.DB("utag ##UTID##: Web Experiment post-init registration error: " + e); } catch (_) {}
+        }
+      };
+
       if (initResult && initResult.promise && typeof initResult.promise.then === "function") {
         initResult.promise.then(function () {
+          u.registerWebExperimentPostInit();
           u.amplitudeReady = true;
           u.drain();
         });
@@ -477,6 +507,7 @@ try {
         var start = Date.now();
         (function waitReady(){
           if (u.isSDKReady() || Date.now() - start > 5000) {
+            u.registerWebExperimentPostInit();
             u.amplitudeReady = true;
             u.drain();
           } else {
@@ -620,6 +651,17 @@ try {
         guides_and_surveys: "##UTVARconfig_guides_and_surveys##",
         // Web Experiment (set to "true" when using the external synchronous experiment tag)
         web_experiment: "##UTVARconfig_web_experiment##",
+        // Web Experiment plugin registration timing.
+        //   "false" (default): register the plugin AFTER amplitude.init() resolves.
+        //     This is the verified-working path for "On Event Tracked" Page Triggers
+        //     when the matching event is a custom event tracked via Tealium.
+        //   "true": register the plugin BEFORE amplitude.init() (legacy behavior).
+        //     Use this only if you need the Web Experiment plugin to observe
+        //     autocaptured events that fire DURING init (e.g. the first
+        //     [Amplitude] Page Viewed). Note: pre-init registration is currently
+        //     unreliable on SDK 2.34.1-feat-zoning-alpha.0 — Tim Yiu (Experiment)
+        //     confirmed the plugin is not effectively attached when added pre-init.
+        web_experiment_pre_init: "##UTVARconfig_web_experiment_pre_init##",
         // Cookie Options
         domain: "",
         expiration: "",

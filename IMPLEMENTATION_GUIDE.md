@@ -55,9 +55,20 @@ Set these in the tag configuration panel:
 | `session_replay_version` | e.g. `1.27.7` | If session replay is enabled |
 | `guides_and_surveys` | `true` or `false` | Yes |
 | `web_experiment` | `true` or `false` | Yes |
+| `web_experiment_pre_init` | `true` or `false` (default `false`) | No |
 | `sdk_version` | Leave empty (hardcoded to zoning build) | No |
 
 **If using the two-tag setup:** Set `web_experiment` to `true` since the synchronous experiment script is loaded separately.
+
+### `web_experiment_pre_init` — when to flip it
+
+Controls **when** the Web Experiment plugin is added to the Amplitude Analytics SDK.
+
+- **`false` (default, recommended):** the plugin is registered **after** `amplitude.init()` resolves, just before the tag drains its queued events. This is the verified-working path for "On Event Tracked" Page Triggers when the matching event is a **custom event** sent from Tealium (e.g. `page_view`, `add_to_cart`). On the current SDK build (`2.34.1-feat-zoning-alpha.0`), pre-init registration is unreliable — the plugin never effectively attaches and triggers silently fail.
+
+- **`true`:** the plugin is registered **before** `amplitude.init()`. Use this **only** if your Page Triggers need to evaluate against **autocaptured events** that fire inside init's lifecycle (e.g. the first `[Amplitude] Page Viewed`). With custom Tealium-fired events, you don't need this — leave it `false`.
+
+Switching between the two paths is config-only — no template edit required.
 
 ### Data Layer Mappings
 
@@ -203,7 +214,8 @@ After publishing, verify in the browser DevTools:
 | No events at all | Missing or wrong `api_key` | Check tag configuration |
 | Events sent but not visible in Amplitude | Wrong `serverZone` (US vs EU) | Map `serverZone` to `EU` |
 | `webExperiment not available after 3000ms` | Tag 1 not loading or not synchronous | Verify Tag 1 load type is synchronous and has highest priority |
-| Page Triggers not firing (~45% miss rate) | Web Experiment plugin registered after `amplitude.init()` | Ensure `web_experiment` is `true` and Tag 1 loads synchronously before Tag 2 |
+| Page Triggers on custom events not firing | `web_experiment_pre_init` set to `true` on a build where pre-init add is broken | Leave `web_experiment_pre_init` at `false` (default) so the plugin registers post-init |
+| Page Triggers on `[Amplitude] Page Viewed` (autocaptured) not firing | Plugin registered post-init, so it misses init-time autocaptured events | Set `web_experiment_pre_init` to `true` (only if you specifically target autocaptured events) |
 | Session Replay not recording | `session_replay` set to `false` or wrong version | Check config variable values |
 | Tag hangs, no init | CDN script failed to load | Check Network tab for 404s on `cdn.eu.amplitude.com` — the tag has onerror handling and will proceed |
 
